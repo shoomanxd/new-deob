@@ -1,0 +1,18 @@
+{
+  "name": "custom-deobfuscator",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.24.0",
+    "@babel/traverse": "^7.24.0",
+    "webcrack": "^2.14.1"
+  },
+  "devDependencies": {
+    "vite": "^5.2.0",
+    "vite-plugin-node-polyfills": "^0.21.0"
+  }
+}
