@@ -1,115 +1,7 @@
-import { webcrack } from 'webcrack';
-import { parse } from '@babel/parser';
-import traverseModule from '@babel/traverse';
-import generateModule from '@babel/generator';
-import * as t from '@babel/types';
+// The "?worker" tag is Vite magic. It automatically bundles the file as a Web Worker!
+import DeobfuscatorWorker from './worker.js?worker';
 
-// Handle Vite's ESM quirks with Babel
-const traverse = traverseModule.default || traverseModule;
-const generate = generateModule.default || generateModule;
-
-/**
- * Custom AST Pass 1: Constant Folding
- * This evaluates all the garbage math and string concatenations.
- * E.g., `1 + 2` becomes `3`. `["a", "b"].join("")` becomes `"ab"`.
- */
-function foldConstants(ast) {
-    let changed = false;
-    traverse(ast, {
-        "BinaryExpression|LogicalExpression|UnaryExpression"(path) {
-            try {
-                const evaluated = path.evaluate();
-                if (evaluated.confident && evaluated.value !== undefined) {
-                    path.replaceWith(t.valueToNode(evaluated.value));
-                    changed = true;
-                }
-            } catch (e) {
-                // Ignore evaluation errors
-            }
-        },
-        MemberExpression(path) {
-            // Evaluates static array access like Pj3JEg3[0] if the array is known
-            try {
-                const evaluated = path.evaluate();
-                if (evaluated.confident && evaluated.value !== undefined) {
-                    // Prevent replacing necessary object properties with undefined
-                    if (typeof evaluated.value !== 'function') {
-                        path.replaceWith(t.valueToNode(evaluated.value));
-                        changed = true;
-                    }
-                }
-            } catch (e) {
-                // Ignore
-            }
-        }
-    });
-    return changed;
-}
-
-export async function processPayload(obfuscatedCode) {
-    try {
-        let extractedPayload = null;
-
-        // Step 1: Parse the outer shell
-        const shellAst = parse(obfuscatedCode, { sourceType: 'script',
-                                               allowReturnOutsideFunction: true});
-
-        // Step 2: Extract the Function(...) payload
-        traverse(shellAst, {
-            CallExpression(path) {
-                if (path.node.callee.name === 'Function') {
-                    const args = path.node.arguments;
-                    if (args.length > 0 && args[args.length - 1].type === 'StringLiteral') {
-                        extractedPayload = args[args.length - 1].value;
-                        path.stop(); 
-                    }
-                }
-            }
-        });
-
-        if (!extractedPayload) {
-            throw new Error("Could not find the dynamic Function string payload.");
-        }
-
-        // Step 3: Parse the extracted inner payload into a new AST
-const innerAst = parse(extractedPayload, { 
-    sourceType: 'script',
-    allowReturnOutsideFunction: true // <--- Add this line
-});
-
-        // Step 4: Apply our Custom AST Passes (Loop until no more constants can be folded)
-        let keepFolding = true;
-        let iterations = 0;
-        while (keepFolding && iterations < 5) { // Cap at 5 to prevent infinite loops
-            keepFolding = foldConstants(innerAst);
-            iterations++;
-        }
-
-        // Step 5: Generate the cleaned inner code
-        const { code: cleanedInnerCode } = generate(innerAst, {
-            retainLines: false,
-            compact: false,
-            comments: false
-        });
-
-        // Step 6: Pass our custom-cleaned code into Webcrack to finish the job
-        const result = await webcrack(cleanedInnerCode, {
-            unminify: true,
-            deobfuscate: true,
-            jsx: false,
-            unpack: false
-        });
-
-        return result.code;
-
-    } catch (error) {
-        console.error(error);
-        return `Error during custom deobfuscation: \n${error.message}`;
-    }
-}
-
-// Attach to the UI
-document.getElementById('btn')?.addEventListener('click', async () => {
+document.getElementById('btn')?.addEventListener('click', () => {
     const input = document.getElementById('input').value.trim();
     const output = document.getElementById('output');
     
@@ -118,7 +10,37 @@ document.getElementById('btn')?.addEventListener('click', async () => {
         return;
     }
 
-    output.value = "Running Custom AST Passes & Webcrack... Please wait.";
-    const cleanCode = await processPayload(input);
-    output.value = cleanCode;
+    output.value = "Starting background worker... Browser will NOT freeze.";
+
+    // 1. Create the background worker
+    const worker = new DeobfuscatorWorker();
+
+    // 2. Send the input code to the worker
+    worker.postMessage({ input });
+
+    // 3. Listen for updates and the final result from the worker
+    worker.onmessage = (event) => {
+        const data = event.data;
+
+        // If it's just a status update, show it
+        if (data.status) {
+            output.value += `\n${data.status}`;
+        } 
+        // If it's the final success result
+        else if (data.success) {
+            output.value = data.code;
+            worker.terminate(); // Kill the worker to free up memory
+        } 
+        // If it crashed
+        else if (data.success === false) {
+            output.value += `\n\nERROR:\n${data.error}`;
+            worker.terminate();
+        }
+    };
+
+    // If the worker completely crashes
+    worker.onerror = (err) => {
+        output.value += `\n\nFATAL WORKER ERROR:\n${err.message}`;
+        worker.terminate();
+    };
 });
