@@ -10,9 +10,11 @@ let arrayName = null;
 let arrayElements = [];
 
 // Pass 1: Find the Dictionary
+// Pass 1: Find the Dictionary (Upgraded)
 function extractDictionary(ast) {
     traverse(ast, {
         VariableDeclarator(path) {
+            // Look for an array with more than 50 elements
             if (
                 path.node.id.type === 'Identifier' &&
                 path.node.init &&
@@ -22,22 +24,35 @@ function extractDictionary(ast) {
                 let allLiterals = true;
                 let tempElements = [];
 
-                for (let el of path.node.init.elements) {
-                    if (el === null) tempElements.push(null);
-                    else if (el.type === 'NumericLiteral' || el.type === 'StringLiteral' || el.type === 'BooleanLiteral') tempElements.push(el.value);
-                    else if (el.type === 'UnaryExpression' && el.operator === 'void') tempElements.push(undefined);
-                    else { allLiterals = false; break; }
+                // Use Babel's built-in evaluator instead of checking manually
+                const elementsPaths = path.get('init.elements');
+                for (let elPath of elementsPaths) {
+                    if (!elPath.node) {
+                        tempElements.push(undefined);
+                        continue;
+                    }
+                    
+                    const evaluated = elPath.evaluate();
+                    if (evaluated.confident) {
+                        tempElements.push(evaluated.value);
+                    } else {
+                        // If Babel can't figure out the value, this isn't our static dictionary
+                        allLiterals = false;
+                        break;
+                    }
                 }
 
                 if (allLiterals) {
                     arrayName = path.node.id.name;
                     arrayElements = tempElements;
+                    console.log("Dictionary Array Found:", arrayName);
                     path.stop(); 
                 }
             }
         }
     });
 }
+
 
 // Pass 2: Fold a single layer
 function foldASTLayer(ast) {
