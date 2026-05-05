@@ -8,31 +8,22 @@ import * as t from '@babel/types';
 const traverse = traverseModule.default || traverseModule;
 const generate = generateModule.default || generateModule;
 
+// Helper to force the CPU to pause so the UI can receive the log messages
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 function foldConstants(ast) {
-    let changed = false;
     traverse(ast, {
         "BinaryExpression|LogicalExpression|UnaryExpression"(path) {
             try {
                 const evaluated = path.evaluate();
                 if (evaluated.confident && evaluated.value !== undefined) {
                     path.replaceWith(t.valueToNode(evaluated.value));
-                    changed = true;
                 }
-            } catch (e) {}
-        },
-        MemberExpression(path) {
-            try {
-                const evaluated = path.evaluate();
-                if (evaluated.confident && evaluated.value !== undefined) {
-                    if (typeof evaluated.value !== 'function') {
-                        path.replaceWith(t.valueToNode(evaluated.value));
-                        changed = true;
-                    }
-                }
-            } catch (e) {}
+            } catch (e) {
+                // Safely ignore math errors
+            }
         }
     });
-    return changed;
 }
 
 // Listen for messages from the UI
@@ -41,6 +32,8 @@ self.onmessage = async function(event) {
 
     try {
         self.postMessage({ status: '1. Parsing outer shell AST...' });
+        await sleep(100); // Yield to event loop to print log
+
         const shellAst = parse(input, { sourceType: 'script', allowReturnOutsideFunction: true });
         
         let extractedPayload = null;
@@ -61,23 +54,23 @@ self.onmessage = async function(event) {
             throw new Error("Could not find the Function string payload.");
         }
 
-        self.postMessage({ status: '2. Folding constants (cleaning garbage math)...' });
+        self.postMessage({ status: '2. Payload found! Cleaning garbage math...' });
+        await sleep(100);
+
         const innerAst = parse(extractedPayload, { sourceType: 'script', allowReturnOutsideFunction: true });
 
-        // Cap at 3 iterations to prevent infinite loops from locking the worker
-        let keepFolding = true;
-        let iterations = 0;
-        while (keepFolding && iterations < 3) {
-            keepFolding = foldConstants(innerAst);
-            iterations++;
-        }
+        // Safely fold the constants once to simplify the math
+        foldConstants(innerAst);
 
-        self.postMessage({ status: '3. Handing off to Webcrack...' });
+        self.postMessage({ status: '3. Handing off to Webcrack for unminification...' });
+        await sleep(100);
+
         const { code: cleanedInnerCode } = generate(innerAst, { retainLines: false, compact: false, comments: false });
 
+        // CRITICAL FIX: Disable webcrack's deobfuscator, only use the unminifier.
         const result = await webcrack(cleanedInnerCode, {
             unminify: true,
-            deobfuscate: true,
+            deobfuscate: false, // <--- This was causing the infinite freeze
             jsx: false,
             unpack: false
         });
@@ -86,6 +79,6 @@ self.onmessage = async function(event) {
         self.postMessage({ success: true, code: result.code });
 
     } catch (error) {
-        self.postMessage({ success: false, error: error.message });
+        self.postMessage({ success: false, error: error.message || error.toString() });
     }
 };
