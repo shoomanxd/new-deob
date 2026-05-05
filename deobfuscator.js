@@ -51,7 +51,8 @@ export async function processPayload(obfuscatedCode) {
         let extractedPayload = null;
 
         // Step 1: Parse the outer shell
-        const shellAst = parse(obfuscatedCode, { sourceType: 'script' });
+        const shellAst = parse(obfuscatedCode, { sourceType: 'script',
+                                               allowReturnOutsideFunction: true});
 
         // Step 2: Extract the Function(...) payload
         traverse(shellAst, {
@@ -71,7 +72,10 @@ export async function processPayload(obfuscatedCode) {
         }
 
         // Step 3: Parse the extracted inner payload into a new AST
-        const innerAst = parse(extractedPayload, { sourceType: 'script' });
+const innerAst = parse(extractedPayload, { 
+    sourceType: 'script',
+    allowReturnOutsideFunction: true // <--- Add this line
+});
 
         // Step 4: Apply our Custom AST Passes (Loop until no more constants can be folded)
         let keepFolding = true;
