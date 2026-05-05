@@ -3,205 +3,139 @@ import traverseModule from '@babel/traverse';
 import generateModule from '@babel/generator';
 import * as t from '@babel/types';
 
-// Handle Vite's ESM packaging quirks
 const traverse = traverseModule.default || traverseModule;
 const generate = generateModule.default || generateModule;
 
 let arrayName = null;
 let arrayElements = [];
 
-// Pass 1: Find the Dictionary Array safely
+// --- PASS 1: DICTIONARY EXTRACTION ---
 function extractDictionary(ast) {
     traverse(ast, {
         VariableDeclarator(path) {
-            // Look for an array with more than 50 elements
-            if (
-                path.node.id.type === 'Identifier' &&
-                path.node.init &&
-                path.node.init.type === 'ArrayExpression' &&
-                path.node.init.elements.length > 50
-            ) {
-                let allLiterals = true;
+            if (path.node.init?.type === 'ArrayExpression' && path.node.init.elements.length > 50) {
                 let tempElements = [];
-
                 const elementsPaths = path.get('init.elements');
                 for (let elPath of elementsPaths) {
-                    if (!elPath.node) {
-                        tempElements.push(undefined);
-                        continue;
-                    }
-
-                    // Manually handle 'void 0' which sometimes confuses Babel
-                    if (elPath.isUnaryExpression({ operator: 'void' })) {
-                        tempElements.push(undefined);
-                        continue;
-                    }
-
-                    // Let Babel compute weird obfuscator tricks like !0x1 or !0x0
+                    if (!elPath.node) { tempElements.push(undefined); continue; }
                     const evaluated = elPath.evaluate();
-                    if (evaluated.confident) {
-                        tempElements.push(evaluated.value);
-                    } else {
-                        allLiterals = false;
-                        break;
-                    }
+                    if (evaluated.confident) tempElements.push(evaluated.value);
+                    else return;
                 }
-
-                if (allLiterals) {
-                    arrayName = path.node.id.name;
-                    arrayElements = tempElements;
-                    console.log(`Dictionary Found: ${arrayName} with ${arrayElements.length} items.`);
-                    path.stop(); 
-                }
+                arrayName = path.node.id.name;
+                arrayElements = tempElements;
+                path.stop();
             }
         }
     });
 }
 
-// Pass 2: Fold a single layer of math and array lookups
+// --- PASS 2: CONSTANT FOLDING ---
 function foldASTLayer(ast) {
     let changed = false;
     traverse(ast, {
-        // Find Pj3JEg3[15] and replace with actual value
         MemberExpression(path) {
-            if (path.node.object.name === arrayName && path.node.computed) {
-                const prop = path.node.property;
-                if (prop.type === 'NumericLiteral') {
-                    const val = arrayElements[prop.value];
-                    if (val !== undefined) {
-                        if (val === null) {
-                            path.replaceWith(t.nullLiteral());
-                        } else if (typeof val === 'number') {
-                            // AST requires negative numbers to be built specifically
-                            if (val < 0) path.replaceWith(t.unaryExpression('-', t.numericLiteral(Math.abs(val))));
-                            else path.replaceWith(t.numericLiteral(val));
-                        } else if (typeof val === 'string') {
-                            path.replaceWith(t.stringLiteral(val));
-                        } else if (typeof val === 'boolean') {
-                            path.replaceWith(t.booleanLiteral(val));
-                        }
-                        changed = true;
-                    } else {
-                        // It is actually undefined
-                        path.replaceWith(t.identifier('undefined'));
-                        changed = true;
-                    }
-                }
+            if (path.node.object.name === arrayName && path.node.computed && t.isNumericLiteral(path.node.property)) {
+                const val = arrayElements[path.node.property.value];
+                path.replaceWith(t.valueToNode(val === undefined ? undefined : val));
+                changed = true;
             }
         },
-        // Calculate garbage math
         "BinaryExpression|LogicalExpression|UnaryExpression"(path) {
             try {
                 const evaluated = path.evaluate();
                 if (evaluated.confident && evaluated.value !== undefined) {
-                    const val = evaluated.value;
-                    if (val === null) {
-                        path.replaceWith(t.nullLiteral());
-                        changed = true;
-                    } else if (typeof val === 'number') { 
-                        // Fix for Babel crashing on negative numbers
-                        if (val < 0) path.replaceWith(t.unaryExpression('-', t.numericLiteral(Math.abs(val))));
-                        else path.replaceWith(t.numericLiteral(val)); 
-                        changed = true; 
-                    } else if (typeof val === 'string') { 
-                        path.replaceWith(t.stringLiteral(val)); 
-                        changed = true; 
-                    } else if (typeof val === 'boolean') { 
-                        path.replaceWith(t.booleanLiteral(val)); 
-                        changed = true; 
-                    }
+                    path.replaceWith(t.valueToNode(evaluated.value));
+                    changed = true;
                 }
-            } catch (e) {
-                // Safely ignore math that can't be resolved yet
-            }
+            } catch (e) {}
         }
     });
     return changed;
 }
 
-// MAIN EXECUTION
+// --- PASS 3: VIRTUAL MACHINE STRING RESOLUTION ---
+function resolveStringsVM(ast) {
+    let changedCount = 0;
+    // 1. Grab all global functions and variables (the decoders)
+    const setupNodes = ast.program.body.filter(n => t.isFunctionDeclaration(n) || t.isVariableDeclaration(n));
+    const { code: setupCode } = generate(t.program(setupNodes), { compact: true });
+
+    // 2. Create the Sandbox
+    let vm;
+    try {
+        vm = new Function(`
+            ${setupCode};
+            return function(fn, arg) { 
+                try { return eval(fn)(arg); } catch(e) { return null; } 
+            };
+        `)();
+    } catch (e) { return 0; }
+
+    // 3. Replace calls like mRmaj76(100)
+    traverse(ast, {
+        CallExpression(path) {
+            if (t.isIdentifier(path.node.callee) && path.node.arguments.length === 1 && t.isNumericLiteral(path.node.arguments[0])) {
+                const result = vm(path.node.callee.name, path.node.arguments[0].value);
+                if (typeof result === 'string') {
+                    path.replaceWith(t.stringLiteral(result));
+                    changedCount++;
+                }
+            }
+        }
+    });
+    return changedCount;
+}
+
 document.getElementById('btn')?.addEventListener('click', async () => {
     const input = document.getElementById('input').value.trim();
     const output = document.getElementById('output');
     const progressBar = document.getElementById('progressBar');
-    
     if (!input) return;
 
-    // Reset UI
-    output.value = "Starting Custom AST Pipeline...";
-    if (progressBar) {
-        progressBar.style.display = "block";
-        progressBar.value = 0;
-    }
+    output.value = "Initializing AST Pipeline...";
+    progressBar.style.display = "block";
+    progressBar.value = 5;
 
-    // Force browser to render UI before locking CPU
     const yieldToBrowser = () => new Promise(r => setTimeout(r, 10));
 
     try {
-        await yieldToBrowser();
-        
-        // 1. Extract shell payload (allowReturnOutsideFunction fixes the 1:32396 error)
         const shellAst = parse(input, { sourceType: 'script', allowReturnOutsideFunction: true });
         let extractedPayload = null;
-        
         traverse(shellAst, {
             CallExpression(path) {
-                if (path.node.callee.name === 'Function') {
-                    const args = path.node.arguments;
-                    if (args.length > 0 && args[args.length - 1].type === 'StringLiteral') {
-                        extractedPayload = args[args.length - 1].value;
-                        path.stop(); 
-                    }
+                if (path.node.callee.name === 'Function' && path.node.arguments.length > 0) {
+                    const lastArg = path.node.arguments[path.node.arguments.length - 1];
+                    if (t.isStringLiteral(lastArg)) { extractedPayload = lastArg.value; path.stop(); }
                 }
             }
         });
 
-        if (!extractedPayload) throw new Error("Function payload not found. Make sure you pasted the raw original code.");
+        if (!extractedPayload) throw new Error("Payload extraction failed.");
 
-        if (progressBar) progressBar.value = 10;
-        output.value = "Payload found. Parsing inner AST...";
-        await yieldToBrowser();
-
-        // 2. Parse inner AST and extract the dictionary
         const innerAst = parse(extractedPayload, { sourceType: 'script', allowReturnOutsideFunction: true });
-        
         extractDictionary(innerAst);
         
-        if (!arrayName) {
-            throw new Error("Dictionary array not found! The extraction logic missed it.");
-        }
-
-        // 3. Chunked Execution Loop (Clean up the math)
-        const maxIterations = 30; // Increased to 30 just in case
-        let keepFolding = true;
-        
-        for (let i = 0; i < maxIterations; i++) {
-            if (!keepFolding) break;
-            
-            if (progressBar) progressBar.value = 10 + Math.floor((i / maxIterations) * 80);
-            output.value = `Running AST Pass ${i + 1} of ${maxIterations}...\nReplacing ${arrayName} lookups and folding math.`;
+        // Loop folding until stable
+        for (let i = 0; i < 10; i++) {
+            progressBar.value = 20 + (i * 5);
+            output.value = `Folding Layer ${i+1}...`;
             await yieldToBrowser();
-
-            keepFolding = foldASTLayer(innerAst);
+            if (!foldASTLayer(innerAst)) break;
         }
 
-        if (progressBar) progressBar.value = 95;
-        output.value = "Generating final code...";
+        output.value = "Running String Decoder VM...";
+        progressBar.value = 80;
         await yieldToBrowser();
+        const resolved = resolveStringsVM(innerAst);
 
-        // 4. Generate the simplified code
-        const { code: cleanedInnerCode } = generate(innerAst, { 
-            retainLines: false, 
-            compact: false, 
-            comments: false 
-        });
+        output.value = `Resolved ${resolved} strings. Finalizing...`;
+        const { code: finalCode } = generate(innerAst, { retainLines: false, compact: false });
 
-        if (progressBar) progressBar.value = 100;
-        output.value = "--- AST DICTIONARY REPLACEMENT DONE ---\n\n" + cleanedInnerCode;
+        progressBar.value = 100;
+        output.value = `--- DEOBFUSCATION COMPLETE ---\n\n` + finalCode;
 
     } catch (err) {
-        console.error(err);
-        output.value = "ERROR:\n" + (err.message || err.stack);
-        if (progressBar) progressBar.classList.add("progress-error");
+        output.value = "ERROR: " + err.message;
     }
 });
