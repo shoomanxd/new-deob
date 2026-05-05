@@ -1,4 +1,3 @@
-import { webcrack } from 'webcrack';
 import { parse } from '@babel/parser';
 import traverseModule from '@babel/traverse';
 import generateModule from '@babel/generator';
@@ -8,21 +7,113 @@ import * as t from '@babel/types';
 const traverse = traverseModule.default || traverseModule;
 const generate = generateModule.default || generateModule;
 
-// Our custom math cleaner
-function foldConstants(ast) {
+/**
+ * CUSTOM JSCONFUSER DEOBFUSCATION PIPELINE
+ */
+function customDeobfuscate(ast) {
+    let arrayName = null;
+    let arrayElements = [];
+
+    // Step 1: Find the massive dictionary array (e.g., Pj3JEg3)
     traverse(ast, {
-        "BinaryExpression|LogicalExpression|UnaryExpression"(path) {
-            try {
-                const evaluated = path.evaluate();
-                // If Babel can calculate the math, replace the math with the final number
-                if (evaluated.confident && evaluated.value !== undefined) {
-                    path.replaceWith(t.valueToNode(evaluated.value));
+        VariableDeclarator(path) {
+            if (
+                path.node.id.type === 'Identifier' &&
+                path.node.init &&
+                path.node.init.type === 'ArrayExpression' &&
+                path.node.init.elements.length > 50 // Look for a suspiciously large array
+            ) {
+                let allLiterals = true;
+                let tempElements = [];
+
+                // Extract all elements safely
+                for (let el of path.node.init.elements) {
+                    if (el === null) {
+                        tempElements.push(null);
+                    } else if (el.type === 'NumericLiteral' || el.type === 'StringLiteral' || el.type === 'BooleanLiteral') {
+                        tempElements.push(el.value);
+                    } else if (el.type === 'UnaryExpression' && el.operator === 'void') {
+                        tempElements.push(undefined);
+                    } else {
+                        allLiterals = false;
+                        break;
+                    }
                 }
-            } catch (e) {
-                // Ignore math errors
+
+                // If we successfully mapped it, save it into memory
+                if (allLiterals) {
+                    arrayName = path.node.id.name;
+                    arrayElements = tempElements;
+                    console.log("Dictionary Array Found:", arrayName);
+                    path.stop(); 
+                }
             }
         }
     });
+
+    if (!arrayName) {
+        console.warn("Could not locate the dictionary array. Obfuscation pattern might have changed.");
+        return;
+    }
+
+    // Step 2: Loop through the AST, replacing array lookups and evaluating math
+    let keepFolding = true;
+    let iterations = 0;
+    
+    while (keepFolding && iterations < 20) { // Cap at 20 iterations to prevent infinite loops
+        keepFolding = false;
+        iterations++;
+
+        traverse(ast, {
+            // Replace `Pj3JEg3[25]` with its actual value
+            MemberExpression(path) {
+                if (path.node.object.name === arrayName && path.node.computed) {
+                    const prop = path.node.property;
+                    if (prop.type === 'NumericLiteral') {
+                        const val = arrayElements[prop.value];
+                        
+                        if (val !== undefined) {
+                            if (val === null) {
+                                path.replaceWith(t.nullLiteral());
+                            } else if (typeof val === 'number') {
+                                path.replaceWith(t.numericLiteral(val));
+                            } else if (typeof val === 'string') {
+                                path.replaceWith(t.stringLiteral(val));
+                            } else if (typeof val === 'boolean') {
+                                path.replaceWith(t.booleanLiteral(val));
+                            }
+                            keepFolding = true;
+                        } else {
+                            // Handle undefined explicitly
+                            path.replaceWith(t.identifier('undefined'));
+                            keepFolding = true;
+                        }
+                    }
+                }
+            },
+            // Fold math operations like `1 + 2` -> `3`
+            "BinaryExpression|LogicalExpression|UnaryExpression"(path) {
+                try {
+                    const evaluated = path.evaluate();
+                    if (evaluated.confident && evaluated.value !== undefined) {
+                        const val = evaluated.value;
+                        if (typeof val === 'number') {
+                            path.replaceWith(t.numericLiteral(val));
+                            keepFolding = true;
+                        } else if (typeof val === 'string') {
+                            path.replaceWith(t.stringLiteral(val));
+                            keepFolding = true;
+                        } else if (typeof val === 'boolean') {
+                            path.replaceWith(t.booleanLiteral(val));
+                            keepFolding = true;
+                        }
+                    }
+                } catch (e) {
+                    // Ignore math errors caused by unresolved variables
+                }
+            }
+        });
+    }
 }
 
 document.getElementById('btn')?.addEventListener('click', async () => {
@@ -34,17 +125,12 @@ document.getElementById('btn')?.addEventListener('click', async () => {
         return;
     }
 
-    // Tell the user what's happening
-    output.value = "Freezing browser to crunch the AST...\nSee you in 10-30 seconds.";
-    
-    // CRITICAL: Give the browser 50 milliseconds to actually draw the text above 
-    // onto the screen before we completely lock up the CPU thread.
+    output.value = "Freezing browser to crunch the AST via Custom Pipeline...\nSee you in a few seconds.";
     await new Promise(resolve => setTimeout(resolve, 50));
 
     try {
-        // 1. Parse outer shell (with the return fix!)
+        // 1. Parse outer shell
         const shellAst = parse(input, { sourceType: 'script', allowReturnOutsideFunction: true });
-        
         let extractedPayload = null;
 
         traverse(shellAst, {
@@ -61,26 +147,20 @@ document.getElementById('btn')?.addEventListener('click', async () => {
 
         if (!extractedPayload) throw new Error("Could not find the Function string payload.");
 
-        // 2. Parse the extracted payload
+        // 2. Parse the extracted inner payload
         const innerAst = parse(extractedPayload, { sourceType: 'script', allowReturnOutsideFunction: true });
 
-        // 3. Fold the constants to clean up the garbage math
-        foldConstants(innerAst);
+        // 3. Run our custom JSConfuser un-packer
+        customDeobfuscate(innerAst);
 
         // 4. Generate the simplified code
-        const { code: cleanedInnerCode } = generate(innerAst, { retainLines: false, compact: false, comments: false });
-
-        // 5. Run Webcrack
-        // CRITICAL FIX: deobfuscate is FALSE so it doesn't infinite loop and permanently freeze
-        const result = await webcrack(cleanedInnerCode, {
-            unminify: true,
-            deobfuscate: false, 
-            jsx: false,
-            unpack: false
+        const { code: cleanedInnerCode } = generate(innerAst, { 
+            retainLines: false, 
+            compact: false, 
+            comments: false 
         });
 
-        // 6. Print the final result!
-        output.value = "--- DONE ---\n\n" + result.code;
+        output.value = "--- AST DICTIONARY REPLACEMENT DONE ---\n\n" + cleanedInnerCode;
 
     } catch (err) {
         console.error(err);
